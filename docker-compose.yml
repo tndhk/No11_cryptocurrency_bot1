@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  trading-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: trading-bot
+    volumes:
+      - ./:/app
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./results:/app/results
+      - ./cache:/app/cache
+      - ./models:/app/models
+    env_file:
+      - .env
+    restart: unless-stopped
+    command: python trading_bot.py --mode backtest
+    # 本番環境用コマンド（リアルタイムモード）
+    # command: python trading_bot.py --mode live
+
+  jupyter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: trading-bot-jupyter
+    volumes:
+      - ./:/app
+      - ./data:/app/data
+      - ./notebooks:/app/notebooks
+      - ./results:/app/results
+      - ./cache:/app/cache
+      - ./models:/app/models
+    ports:
+      - "8888:8888"
+    env_file:
+      - .env
+    command: jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root
+    # Jupyterへのアクセスはブラウザから: http://localhost:8888
+  
+  optimization:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: trading-bot-optimization
+    volumes:
+      - ./:/app
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./results:/app/results
+      - ./cache:/app/cache
+      - ./models:/app/models
+    env_file:
+      - .env
+    command: python trading_bot.py --mode optimize
+    # パラメータ最適化専用のサービス
