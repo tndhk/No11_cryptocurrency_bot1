@@ -40,18 +40,42 @@ services:
     # Jupyterへのアクセスはブラウザから: http://localhost:8888
   
   optimization:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: trading-bot-optimization
-    volumes:
-      - ./:/app
-      - ./data:/app/data
-      - ./logs:/app/logs
-      - ./results:/app/results
-      - ./cache:/app/cache
-      - ./models:/app/models
-    env_file:
-      - .env
-    command: python trading_bot.py --mode optimize
-    # パラメータ最適化専用のサービス
+      build:
+        context: .
+        dockerfile: Dockerfile
+      container_name: trading-bot-optimization
+      volumes:
+        - ./:/app
+        - ./data:/app/data
+        - ./logs:/app/logs
+        - ./results:/app/results
+        - ./cache:/app/cache
+        - ./models:/app/models
+      env_file:
+        - .env
+      environment:
+        - OPTIMIZATION_MODE=simple
+        - OPTIMIZE_IMPORTANT_ONLY=true
+        - OPTIMIZATION_ITERATIONS=50
+        - IMPORTANCE_THRESHOLD=0.1
+      command: python trading_bot.py --mode optimize
+      # 重要なパラメータのみを最適化（高速モード）
+
+  analyze:
+      build:
+        context: .
+        dockerfile: Dockerfile
+      container_name: trading-bot-analyze
+      volumes:
+        - ./:/app
+        - ./data:/app/data
+        - ./logs:/app/logs
+        - ./results:/app/results
+        - ./cache:/app/cache
+        - ./models:/app/models
+      env_file:
+        - .env
+      environment:
+        - IMPORTANCE_ITERATIONS=30
+      command: python trading_bot.py --mode analyze
+      # パラメータ重要度分析専用

@@ -22,6 +22,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# 特定のバージョンの最適化ライブラリをインストール（互換性のため）
+RUN pip install --no-cache-dir scikit-optimize==0.9.0 scikit-learn==1.2.2 numpy==1.24.3
+
 # ソースコードをコピー
 COPY . .
 
