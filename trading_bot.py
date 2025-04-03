@@ -131,6 +131,16 @@ class EnhancedTradingBot:
         self.api_request_count = 0
         self.last_api_reset = time.time()
         self.max_requests_per_minute = 1200  # Binanceの制限
+
+        # リスク管理設定を追加
+        self.MAX_CONSECUTIVE_LOSSES = 3
+        self.max_drawdown_limit = 5.0  # パーセント
+        self.risk_per_trade = 0.01  # 資本の1%
+        self.consecutive_losses = 0
+        self.initial_trade_quantity = float(os.getenv("QUANTITY", "0.001"))
+        self.trade_quantity = self.initial_trade_quantity
+        self.peak_balance = 10000  # バックテスト初期残高
+        self.current_balance = 10000
         
         # データディレクトリの確認
         self._ensure_directories()
@@ -438,24 +448,14 @@ class EnhancedTradingBot:
             df['signal'] = df['ma_signal']
         
         return df
-    
+        
     def generate_trading_signals(self, data):
         """
         トレーディングシグナルの生成
-        
-        Parameters:
-        -----------
-        data : pandas.DataFrame
-            指標が含まれたデータフレーム
-            
-        Returns:
-        --------
-        dict
-            取引シグナル情報
         """
         if data.empty or len(data) < 2:
             return {}
-            
+                
         # 最新のデータポイント
         current = data.iloc[-1]
         previous = data.iloc[-2]
@@ -470,7 +470,7 @@ class EnhancedTradingBot:
             signal = -1  # 売りシグナル
         
         # シグナル情報をまとめる
-        return {
+        signal_info = {
             'timestamp': current['timestamp'],
             'open': current['open'],
             'high': current['high'],
@@ -494,6 +494,20 @@ class EnhancedTradingBot:
             'bb_lower': current.get('BB_lower', 0),
             'atr': current.get('ATR', 0)
         }
+        
+        # ここに高度なフィルタリングを追加
+        if signal != 0:
+            # シグナルをフィルターで検証
+            filtered_signal = self.apply_advanced_filters(signal_info)
+            signal_info['signal'] = filtered_signal
+            
+            # マルチタイムフレーム確認を追加（オプション）
+            # if filtered_signal != 0 and hasattr(self, 'generate_multi_timeframe_signals'):
+            #     mtf_signal = self.generate_multi_timeframe_signals()
+            #     if mtf_signal != filtered_signal:  # 方向が一致しない場合
+            #         signal_info['signal'] = 0  # シグナルをキャンセル
+        
+        return signal_info
     
     def calculate_slippage(self, is_buy: bool) -> float:
         """
@@ -659,14 +673,41 @@ class EnhancedTradingBot:
         is_backtest : bool
             バックテストモードかどうか
         """
+        
+        """取引を実行"""
         signal = signal_info['signal']
+        
+        # リスク管理制限のチェック
+        if self.consecutive_losses >= self.MAX_CONSECUTIVE_LOSSES:
+            # 取引サイズを半分に減らす
+            if self.trade_quantity > self.initial_trade_quantity / 4:  # 最小サイズまで
+                self.trade_quantity = self.trade_quantity / 2
+                logger.info(f"連続損失により取引サイズを削減: {self.trade_quantity}")
+        
+        # 最大ドローダウン制限
+        current_drawdown = self.calculate_current_drawdown()
+        if current_drawdown > self.max_drawdown_limit:
+            # 取引を一時停止
+            logger.warning(f"最大ドローダウン制限({self.max_drawdown_limit}%)に達したため取引を一時停止")
+            return
         
         if signal == 1 and not self.in_position:
             # 買いシグナルかつポジションなし
             try:
                 # 実行価格のシミュレーション
                 execution_price = self.simulate_execution_price(signal_info, is_buy=True)
-                
+
+                # ここに動的ポジションサイジングを追加 ==================
+                if hasattr(self, 'calculate_position_size'):
+                    # 仮のストップロス計算（ポジションサイズの計算用）
+                    temp_stop_loss = execution_price * (1 - self.stop_loss_percent/100)
+                    # リスクベースのポジションサイズ計算
+                    position_size = self.calculate_position_size(execution_price, temp_stop_loss)
+                    # 取引サイズを更新
+                    self.trade_quantity = position_size
+                    logger.info(f"動的ポジションサイズ: {self.trade_quantity}")
+                # ===============================================
+
                 if not is_backtest:
                     self._initialize_client()
                     self._check_api_rate_limit()
@@ -684,8 +725,17 @@ class EnhancedTradingBot:
                 
                 self.in_position = True
                 self.entry_price = execution_price
-                self.stop_loss = execution_price * (1 - self.stop_loss_percent/100)
-                self.take_profit = execution_price * (1 + self.take_profit_percent/100)
+
+                # 動的リスク/リワード比の適用（既存コードの代わりに）
+                if hasattr(self, 'calculate_dynamic_risk_reward'):
+                    # 市場状況に基づく動的な設定
+                    sl_percent, tp_percent = self.calculate_dynamic_risk_reward(signal_info)
+                    self.stop_loss = execution_price * (1 - sl_percent/100)
+                    self.take_profit = execution_price * (1 + tp_percent/100)
+                else:
+                    # 従来の固定パーセンテージ
+                    self.stop_loss = execution_price * (1 - self.stop_loss_percent/100)
+                    self.take_profit = execution_price * (1 + self.take_profit_percent/100)
                 
                 # 取引情報
                 trade_info = {
@@ -746,6 +796,15 @@ class EnhancedTradingBot:
                 # 手数料を考慮した利益計算
                 gross_profit = (execution_price - self.entry_price) * self.trade_quantity
                 net_profit = gross_profit * (1 - self.taker_fee)  # 手数料を差し引く
+                # 損益によって連続損失カウンターを更新
+                if net_profit <= 0:
+                    self.consecutive_losses += 1
+                else:
+                    self.consecutive_losses = 0  # 利益が出たらリセット
+                # バランス更新
+                self.current_balance += net_profit
+
+                # 手数料を考慮
                 profit_percent = (execution_price / self.entry_price - 1) * 100
                 
                 trade_info = {
@@ -787,7 +846,7 @@ class EnhancedTradingBot:
             except Exception as e:
                 logger.error(f"売り注文エラー: {e}")
                 logger.error(traceback.format_exc())
-    
+        
     def optimize_parameters(self, param_grid=None):
         """
         パラメータ最適化を実行
@@ -798,19 +857,19 @@ class EnhancedTradingBot:
             最適化するパラメータのグリッド
         """
         if param_grid is None:
-            # デフォルトのパラメータグリッド
+            # デフォルトのパラメータグリッド - 探索範囲を拡大
             param_grid = {
-                'short_window': [5, 9, 12],
-                'long_window': [18, 21, 26],
-                'stop_loss_percent': [1.0, 2.0, 3.0],
-                'take_profit_percent': [2.0, 3.0, 5.0],
-                'weight_ma': [0.2, 0.3, 0.4],
-                'weight_rsi': [0.1, 0.2, 0.3],
-                'weight_macd': [0.1, 0.2, 0.3],
-                'weight_bb': [0.1, 0.2, 0.3],
+                'short_window': [5, 8, 12, 15],
+                'long_window': [18, 21, 26, 30],
+                'stop_loss_percent': [1.0, 1.5, 2.0, 2.5, 3.0],
+                'take_profit_percent': [2.0, 3.0, 5.0, 7.0, 10.0],
+                'weight_ma': [0.2, 0.3, 0.4, 0.5],
+                'weight_rsi': [0.0, 0.1, 0.2, 0.3],
+                'weight_macd': [0.1, 0.2, 0.3, 0.4],
+                'weight_bb': [0.0, 0.1, 0.2, 0.3],
                 'weight_breakout': [0.0, 0.1, 0.2]
             }
-        
+                
         logger.info("パラメータ最適化を開始...")
         logger.info(f"パラメータグリッド: {param_grid}")
         
@@ -1126,7 +1185,9 @@ class EnhancedTradingBot:
     def run_backtest(self):
         """バックテストを実行する"""
         logger.info("バックテストモードを開始")
-        
+
+        logger.add(sys.stderr, level="DEBUG", format="{time} | {level} | {message}")
+
         # シグナル出力用のデバッグフラグ
         debug_signals = True
 
@@ -1311,6 +1372,8 @@ class EnhancedTradingBot:
                 
                 # 残高履歴を更新
                 self.balance_history.append((current_data['timestamp'], balance))
+                self.current_balance = balance  # 追加
+                self.peak_balance = max(self.peak_balance, balance)  # 追加
             
             # 最後のポジションがまだ残っている場合、クローズ
             if self.in_position:
@@ -1364,6 +1427,7 @@ class EnhancedTradingBot:
         except Exception as e:
             logger.error(f"バックテストエラー: {e}")
             logger.error(traceback.format_exc())
+
 
     def _print_basic_results(self, initial_balance, final_balance):
         """基本的なバックテスト結果を出力"""
@@ -1422,6 +1486,238 @@ class EnhancedTradingBot:
         
         return exit_type, exit_price
 
+    def adapt_parameters_to_market(self, data):
+        """市場ボラティリティに基づいてパラメータを調整"""
+        # 最近のボラティリティを計算
+        recent_data = data.tail(50)
+        volatility = recent_data['close'].pct_change().std() * 100
+        
+        # ボラティリティに基づいて閾値を調整
+        if volatility > 3.0:  # 高ボラティリティ
+            self.buy_threshold = 0.4
+            self.sell_threshold = -0.4
+        elif volatility > 1.5:  # 中ボラティリティ
+            self.buy_threshold = 0.3
+            self.sell_threshold = -0.3
+        else:  # 低ボラティリティ
+            self.buy_threshold = 0.2
+            self.sell_threshold = -0.2
+            
+        # トレンド強度に基づいた重み付け調整
+        adx = self.calculate_adx(data)  # ADX実装が必要
+        if adx > 25:  # 強いトレンド
+            self.weight_ma = 0.45
+            self.weight_macd = 0.35
+            self.weight_rsi = 0.1
+            self.weight_bb = 0.1
+        else:  # 弱いトレンド/レンジ相場
+            self.weight_ma = 0.3
+            self.weight_macd = 0.2
+            self.weight_rsi = 0.2
+            self.weight_bb = 0.3
+
+    def generate_multi_timeframe_signals(self):
+        """複数の時間枠からのシグナルを統合"""
+        # 4時間足データの取得
+        h4_data = self.get_historical_data(interval="4h", is_backtest=True)
+        h4_indicators = self.calculate_indicators(h4_data)
+        h4_signal = self.generate_trading_signals(h4_indicators)
+        
+        # 1時間足データの取得
+        h1_data = self.get_historical_data(interval="1h", is_backtest=True)
+        h1_indicators = self.calculate_indicators(h1_data)
+        h1_signal = self.generate_trading_signals(h1_indicators)
+        
+        # シグナルの統合（例：両方がポジティブなら強いシグナル）
+        if h4_signal['signal'] == 1 and h1_signal['signal'] == 1:
+            return 1  # 強い買いシグナル
+        elif h4_signal['signal'] == -1 and h1_signal['signal'] == -1:
+            return -1  # 強い売りシグナル
+        
+        return 0  # 中立シグナル
+
+    def apply_advanced_filters(self, signal_info):
+        """シグナル品質向上フィルター - 再調整版"""
+        signal = signal_info['signal']
+        
+        # トレンド一致度の確認
+        trend_agreement = 0
+        if signal > 0:  # 買いシグナル
+            if signal_info['ma_signal'] > 0: trend_agreement += 1
+            if signal_info['macd_signal'] > 0: trend_agreement += 1
+            
+            # MACDとMAは一致必須
+            if trend_agreement < 2:
+                return 0
+                
+            # RSIが中間帯より下にあることを確認（買いのスペース）
+            if signal_info['rsi'] > 60:
+                return 0
+                
+        elif signal < 0:  # 売りシグナル
+            if signal_info['ma_signal'] < 0: trend_agreement += 1
+            if signal_info['macd_signal'] < 0: trend_agreement += 1
+            
+            # MACDとMAは一致必須
+            if trend_agreement < 2:
+                return 0
+                
+            # RSIが中間帯より上にあることを確認（売りのスペース）
+            if signal_info['rsi'] < 40:
+                return 0
+        
+        return signal
+        
+    def walk_forward_optimization(self):
+        """ウォークフォワード最適化の実行"""
+        # 例：データを3つの期間に分割
+        total_days = 180
+        in_sample_days = 30
+        out_sample_days = 15
+        
+        end_time = int(time.time() * 1000)
+        
+        results = []
+        
+        # 3つの期間で最適化とテストを繰り返す
+        for i in range(3):
+            # インサンプル期間（最適化用）
+            in_sample_end = end_time - (i * (in_sample_days + out_sample_days) * 24 * 60 * 60 * 1000)
+            in_sample_start = in_sample_end - (in_sample_days * 24 * 60 * 60 * 1000)
+            
+            # 最適化実行
+            best_params = self.optimize_for_period(in_sample_start, in_sample_end)
+            
+            # アウトオブサンプル期間（検証用）
+            out_sample_end = in_sample_start
+            out_sample_start = out_sample_end - (out_sample_days * 24 * 60 * 60 * 1000)
+            
+            # 最適化されたパラメータで検証
+            performance = self.backtest_with_params(best_params, out_sample_start, out_sample_end)
+            results.append(performance)
+        
+        # 結果の分析
+        robustness_score = self.analyze_walk_forward_results(results)
+        return robustness_score, results
+
+
+    def calculate_current_drawdown(self):
+        """現在のドローダウンをパーセンテージで計算"""
+        if not self.balance_history:
+            return 0.0
+        
+        # 履歴からの残高推移
+        current_balance = self.balance_history[-1][1]
+        # これまでの残高のピーク
+        peak_balance = max([b[1] for b in self.balance_history])
+        
+        if peak_balance == 0:
+            return 0.0
+        
+        drawdown_percent = (peak_balance - current_balance) / peak_balance * 100
+        return drawdown_percent
+
+
+    def _get_signal_reason(self, signal_info):
+        """シグナルの理由を判断"""
+        reasons = []
+        
+        if signal_info.get('ma_signal', 0) != 0:
+            reasons.append('移動平均')
+        
+        if signal_info.get('rsi_signal', 0) != 0:
+            reasons.append('RSI')
+        
+        if signal_info.get('macd_signal', 0) != 0:
+            reasons.append('MACD')
+        
+        if signal_info.get('bb_signal', 0) != 0:
+            reasons.append('ボリンジャーバンド')
+        
+        if signal_info.get('breakout_signal', 0) != 0:
+            reasons.append('ブレイクアウト')
+        
+        if not reasons:
+            return '複合シグナル'
+        
+        return '+'.join(reasons)
+
+    def _calculate_hold_duration(self, start_time, end_time):
+        """ポジションの保有期間を計算（時間単位）"""
+        if isinstance(start_time, pd.Timestamp) and isinstance(end_time, pd.Timestamp):
+            duration = (end_time - start_time).total_seconds() / 3600  # 時間に変換
+            return round(duration, 1)
+        return 0
+
+
+    def calculate_adx(self, data, period=14):
+        """ADX（平均方向性指数）の計算"""
+        df = data.copy()
+        
+        # True Range
+        df['tr0'] = abs(df['high'] - df['low'])
+        df['tr1'] = abs(df['high'] - df['close'].shift())
+        df['tr2'] = abs(df['low'] - df['close'].shift())
+        df['tr'] = df[['tr0', 'tr1', 'tr2']].max(axis=1)
+        
+        # +DM, -DM
+        df['up_move'] = df['high'] - df['high'].shift()
+        df['down_move'] = df['low'].shift() - df['low']
+        
+        df['plus_dm'] = np.where((df['up_move'] > df['down_move']) & (df['up_move'] > 0), df['up_move'], 0)
+        df['minus_dm'] = np.where((df['down_move'] > df['up_move']) & (df['down_move'] > 0), df['down_move'], 0)
+        
+        # 14期間の平均
+        df['plus_di'] = 100 * (df['plus_dm'].rolling(window=period).mean() / df['tr'].rolling(window=period).mean())
+        df['minus_di'] = 100 * (df['minus_dm'].rolling(window=period).mean() / df['tr'].rolling(window=period).mean())
+        
+        # DX
+        df['dx'] = 100 * abs(df['plus_di'] - df['minus_di']) / (df['plus_di'] + df['minus_di'])
+        
+        # ADX
+        df['adx'] = df['dx'].rolling(window=period).mean()
+        
+        return df['adx'].iloc[-1] if not df['adx'].empty else 0
+
+    def calculate_dynamic_risk_reward(self, signal_info):
+        """損益比を強化した動的リスク/リワード設定"""
+        # 基本設定を拡大（より大きなリワード）
+        sl_percent = self.stop_loss_percent
+        tp_percent = self.take_profit_percent * 1.5  # 1.5倍に増加
+        
+        # トレンド状況に応じた調整
+        if signal_info['ma_signal'] == signal_info['macd_signal']:
+            # トレンド一致度が高い場合はさらにリワード拡大
+            tp_percent *= 1.2
+        
+        # ボラティリティに基づく調整
+        atr_ratio = signal_info.get('atr', 0) / signal_info['close']
+        if atr_ratio > 0.01:  # 高ボラティリティ
+            # 高ボラティリティ時はより広いTPとSL
+            tp_percent *= 1.2
+            sl_percent *= 1.2
+        
+        return sl_percent, tp_percent
+
+    def calculate_position_size(self, entry_price, stop_loss_price):
+        """リスクに基づくポジションサイズの計算"""
+        # リスク計算：資本の1%をリスクに
+        risk_amount = self.current_balance * 0.01
+        
+        # 価格あたりのリスク（ストップロスまでの距離）
+        price_risk = abs(entry_price - stop_loss_price)
+        
+        if price_risk == 0:
+            return self.trade_quantity  # デフォルト値
+        
+        # 許容リスクに基づく数量計算
+        quantity = risk_amount / price_risk
+        
+        # 最小・最大取引サイズの制限
+        min_trade = 0.0005
+        max_trade = 0.005
+        
+        return max(min(quantity, max_trade), min_trade)
 
 def main():
     """メイン関数"""
@@ -1438,6 +1734,8 @@ def main():
         bot.run_live_trading()
     elif args.mode == 'optimize':
         bot.optimize_parameters()
+
+
 
 if __name__ == "__main__":
     main()
