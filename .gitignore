@@ -27,7 +27,7 @@ venv.bak/
 
 # Logs and data
 logs/
-data/
+trading-bot/data/
 cache/
 results/
 models/
