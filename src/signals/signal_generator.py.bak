@@ -104,11 +104,11 @@ class SignalGenerator:
             if signal_info['macd_signal'] > 0: trend_agreement += 1
             
             # MACDとMAは一致必須
-            if trend_agreement < 1:
+            if trend_agreement < 2:
                 return 0
                 
             # RSIが中間帯より下にあることを確認（買いのスペース）
-            if signal_info['rsi'] > 70:
+            if signal_info['rsi'] > 60:
                 return 0
                 
         elif signal < 0:  # 売りシグナル
@@ -120,7 +120,7 @@ class SignalGenerator:
                 return 0
                 
             # RSIが中間帯より上にあることを確認（売りのスペース）
-            if signal_info['rsi'] < 30:
+            if signal_info['rsi'] < 40:
                 return 0
         
         return signal
