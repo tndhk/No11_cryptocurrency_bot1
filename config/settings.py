@@ -71,7 +71,7 @@ class ConfigManager:
         self.risk_per_trade = float(os.getenv("RISK_PER_TRADE", "0.01"))
         
         # 最適化設定
-        self.optimization_workers = int(os.getenv("OPTIMIZATION_WORKERS", "10"))  # 0=自動
+        self.optimization_workers = int(os.getenv("OPTIMIZATION_WORKERS", "0"))  # 0=自動
         
         # 必要なディレクトリの確認
         self._ensure_directories()
@@ -86,7 +86,41 @@ class ConfigManager:
         return {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
     
     def update(self, **kwargs):
-        """設定を更新"""
+        """
+        設定を更新（型変換付き）
+        
+        Parameters:
+        -----------
+        **kwargs : 
+            更新するパラメータと値
+        """
         for key, value in kwargs.items():
             if hasattr(self, key):
+                # 整数型パラメータは適切に変換
+                if key in ["short_window", "long_window", "rsi_period", "macd_fast", 
+                           "macd_slow", "macd_signal", "bb_period", "execution_delay", 
+                           "price_simulation_steps", "max_consecutive_losses"]:
+                    try:
+                        value = int(value)
+                    except (ValueError, TypeError):
+                        # 変換できない場合は警告を出して元の値を使用
+                        import logging
+                        logging.warning(f"パラメータ '{key}' の値 '{value}' を整数に変換できません。デフォルト値を使用します。")
+                        continue
+                
+                # 浮動小数点型パラメータの変換
+                elif key in ["stop_loss_percent", "take_profit_percent", "rsi_oversold", 
+                             "rsi_overbought", "bb_std", "weight_ma", "weight_rsi", 
+                             "weight_macd", "weight_bb", "weight_breakout", "buy_threshold", 
+                             "sell_threshold", "maker_fee", "taker_fee", "slippage_mean", 
+                             "slippage_std", "max_drawdown_limit", "risk_per_trade"]:
+                    try:
+                        value = float(value)
+                    except (ValueError, TypeError):
+                        # 変換できない場合は警告を出して元の値を使用
+                        import logging
+                        logging.warning(f"パラメータ '{key}' の値 '{value}' を浮動小数点に変換できません。デフォルト値を使用します。")
+                        continue
+                
+                # 設定を更新
                 setattr(self, key, value)

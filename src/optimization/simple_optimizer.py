@@ -155,9 +155,31 @@ class SimpleOptimizer:
                 setattr(self.config, param, value)
     
     def _apply_params(self, params):
-        """設定にパラメータを適用"""
+        """
+        設定にパラメータを適用（型変換付き）
+        
+        Parameters:
+        -----------
+        params : dict
+            適用するパラメータのマップ
+        """
+        # 整数型パラメータの変換が必要なパラメータ
+        integer_params = ["short_window", "long_window", "rsi_period", "macd_fast", 
+                        "macd_slow", "macd_signal", "bb_period", "execution_delay", 
+                        "price_simulation_steps"]
+        
         for param, value in params.items():
             if hasattr(self.config, param):
+                # 整数型パラメータの場合は適切に変換
+                if param in integer_params:
+                    try:
+                        value = int(float(value))  # まず浮動小数点に変換してから整数に
+                        logger.debug(f"パラメータ '{param}' を整数値 {value} に変換しました。")
+                    except (ValueError, TypeError):
+                        logger.warning(f"パラメータ '{param}' の値 '{value}' を整数に変換できません。スキップします。")
+                        continue
+                
+                # 設定に適用
                 setattr(self.config, param, value)
     
     def _optimize_parameter_group(self, params, iterations):
